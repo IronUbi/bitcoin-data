@@ -1,0 +1,136 @@
+name: Bitcoin Veri Güncelleme
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Her gün gece yarısı (UTC saati) çalıştır
+  workflow_dispatch:      # Manuel tetikleme için
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Kodu kontrol et
+      uses: actions/checkout@v2
+      
+    - name: Python kurulumu
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.9'
+        
+    - name: Bağımlılıkları yükle
+      run: |
+        python -m pip install --upgrade pip
+        pip install pandas requests
+        
+    - name: Bitcoin verilerini güncelle
+      run: |
+        python - <<EOF
+        import requests
+        import pandas as pd
+        import json
+        from datetime import datetime
+        import os
+        
+        def get_bitstamp_data(days=30):
+            """Bitstamp API'sinden son X günlük BTC/USD verilerini çeker"""
+            print(f"Son {days} günlük veri çekiliyor...")
+            
+            url = "https://www.bitstamp.net/api/v2/ohlc/btcusd/"
+            params = {
+                "step": 86400,  # 1 gün (saniye cinsinden)
+                "limit": days
+            }
+            
+            try:
+                response = requests.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Veriyi DataFrame'e dönüştür
+                ohlc_data = pd.DataFrame(data['data']['ohlc'])
+                
+                # Sütun tiplerini düzelt
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    ohlc_data[col] = pd.to_numeric(ohlc_data[col])
+                
+                # Timestamp'i datetime'a çevir
+                ohlc_data['timestamp'] = pd.to_datetime(ohlc_data['timestamp'].astype(int), unit='s')
+                
+                print(f"Toplam {len(ohlc_data)} veri noktası alındı.")
+                return ohlc_data
+            
+            except Exception as e:
+                print(f"Veri çekerken hata oluştu: {e}")
+                return None
+        
+        def update_data_file():
+            """Mevcut veriyi günceller veya yeni dosya oluşturur"""
+            file_path = "btcusd_day_data.json"
+            
+            # Yeni verileri çek
+            new_data = get_bitstamp_data(days=30)  # Son 30 günlük veriyi al
+            
+            if new_data is None or new_data.empty:
+                print("Yeni veri çekilemedi, güncelleme yapılmıyor.")
+                return False
+            
+            # Mevcut dosya varsa oku
+            existing_data = None
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, 'r') as f:
+                        file_content = f.read()
+                    
+                    # JSON'dan DataFrame'e dönüştür
+                    existing_data = pd.read_json(file_content)
+                    
+                    # Timestamp sütununu datetime formatına çevir
+                    if 'timestamp' in existing_data.columns:
+                        existing_data['timestamp'] = pd.to_datetime(existing_data['timestamp'])
+                    
+                    print(f"Mevcut veri: {len(existing_data)} satır")
+                except Exception as e:
+                    print(f"Mevcut veriyi okurken hata: {e}")
+            
+            # Veriyi birleştir veya sadece yeni veriyi kullan
+            if existing_data is not None and not existing_data.empty:
+                # Tüm verileri birleştir
+                combined_data = pd.concat([existing_data, new_data])
+                
+                # Timestamp'e göre sırala
+                combined_data = combined_data.sort_values('timestamp')
+                
+                # Tekrarlanan kayıtları kaldır
+                combined_data = combined_data.drop_duplicates(subset=['timestamp'])
+                
+                print(f"Birleştirilmiş veri: {len(combined_data)} satır")
+                final_data = combined_data
+            else:
+                print("Mevcut veri bulunamadı, sadece yeni veri kullanılacak.")
+                final_data = new_data
+            
+            # JSON formatında kaydet
+            final_data.to_json(file_path, orient='records', date_format='iso')
+            print(f"Veriler {file_path} dosyasına kaydedildi.")
+            
+            return True
+        
+        # Ana fonksiyon çağrısı
+        print(f"Bitcoin veri güncelleme başladı: {datetime.now()}")
+        success = update_data_file()
+        print(f"İşlem {'başarılı' if success else 'başarısız'}: {datetime.now()}")
+        EOF
+        
+    - name: Değişiklikleri commit'le
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add btcusd_day_data.json
+        git diff --quiet && git diff --staged --quiet || git commit -m "Bitcoin verileri güncellendi - $(date +'%Y-%m-%d')"
+        
+    - name: Değişiklikleri GitHub'a gönder
+      uses: ad-m/github-push-action@master
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        branch: ${{ github.ref }}
